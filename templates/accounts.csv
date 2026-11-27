@@ -1,0 +1,6 @@
+account_key,platform,slot,enabled,name,page_id,ig_user_id,threads_user_id,subreddit,person_id,organization_id,post_as,board_id,blog,privacy,category_id,made_for_kids,visibility
+fb_main,facebook,1,TRUE,Main Facebook Page,123456789012345,,,,,,,,,,,,
+fb_second,facebook,2,TRUE,Second Page,223456789012345,,,,,,,,,,,,
+ig_brand,instagram,1,TRUE,Brand Instagram,,17841400000000000,,,,,,,,,,,
+rd_main,reddit,1,TRUE,Reddit main,,,,test,,,,,,,,,
+yt_main,youtube,1,TRUE,Main channel,,,,,,,,,,private,22,FALSE,

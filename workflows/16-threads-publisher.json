@@ -1,0 +1,2398 @@
+{
+  "id": "smwf000000000016",
+  "name": "SM 07 Threads Publisher",
+  "nodes": [
+    {
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "efc2ef59-e4a4-4d72-a155-cd5b19e85d0d",
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const j = $input.first().json; return [{ json: { ctl: 'start', job: j } }];"
+      },
+      "id": "79ecc3b3-bf84-4739-a88f-c0d9d20e0cee",
+      "position": [
+        230,
+        0
+      ]
+    },
+    {
+      "name": "Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; const job = it.job || {};\nconst base = { job_id: job.job_id, row_id: job.row_id, platform: job.platform, account_key: job.account_key };\nif (it.ctl === 'done') return [{ json: { ...base, ok: true, post_id: String((it.result && it.result.post_id) || ''), post_url: (it.result && it.result.post_url) || '', note: (it.result && it.result.note) || '' } }];\nconst e = it.ctl === 'fail' ? it.error : { code: 'internal', message: 'unexpected state ' + it.ctl, retryable: false };\nreturn [{ json: { ...base, ok: false, error_code: e.code, error_message: e.message, retryable: !!e.retryable } }];"
+      },
+      "id": "94431e9a-9756-4d60-ac3b-7eb38a169dbd",
+      "position": [
+        5290,
+        380
+      ]
+    },
+    {
+      "name": "Build 0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = { carry: {} };\nconst prev = null;\nconst out = (j => { if (j.format === 'image' || j.format === 'video') { const o = one(j, 'Threads'); if (o) return o; }\n    if (j.text.length > 500) return fail('text_too_long', `Threads allows 500 characters; the supplied text has ${j.text.length}. Shorten it in the sheet (it is never truncated automatically).`);\n    const uid = j.params.threads_user_id || 'me'; const qs = { text: j.text || undefined }; let media = 'TEXT';\n    if (j.format === 'image') { media = 'IMAGE'; qs.image_url = j.media_urls[0]; } else if (j.format === 'video') { media = 'VIDEO'; qs.video_url = j.media_urls[0]; } else if (j.link_url) qs.link_attachment = j.link_url;\n    if (media === 'TEXT' && !j.text) return fail('empty_post', 'no text to post'); qs.media_type = media;\n    return req('POST', `${base(j, 'https://graph.threads.net/v1.0')}/${uid}/threads`, { qs, carry: { media } }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "0b45b6ad-8334-47b6-a3b2-6c4b49d757f8",
+      "position": [
+        460,
+        0
+      ]
+    },
+    {
+      "name": "Route 0",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "5a833a8c-39fc-41e8-ad89-f08b4d391f28",
+      "position": [
+        690,
+        0
+      ]
+    },
+    {
+      "name": "Wait 0",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "46a66623-b237-461b-a393-94b589ccf147",
+      "position": [
+        920,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 0",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "7ecb825a-54ec-4ba1-a8c9-1a3a00bb1a93",
+      "position": [
+        1150,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "3936e5bf-d2a1-4670-a5f6-649bd4d66d9f",
+      "position": [
+        1380,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Threads account 1) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "92e240c9-605e-4e9a-a5ae-0608a8dbe795",
+      "position": [
+        1380,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Threads account 2) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "c4b7a679-4abd-4c09-a49a-656182a455bb",
+      "position": [
+        1380,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Threads account 3) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "fdf7287b-f64e-4141-a920-ee6be46afa4e",
+      "position": [
+        1380,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Threads account 4) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "6eb741c1-29d7-4bf6-ad92-255a8a0e43fc",
+      "position": [
+        1380,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Threads account 5) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "f1278a6e-8560-4a69-ac39-7badf5de5e1d",
+      "position": [
+        1380,
+        150
+      ]
+    },
+    {
+      "name": "Build 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 0').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const e = httpError(prev, last); if (e) return failFrom(e); const cid = prev.body.id; const c = { ...last.carry, creation_id: cid };\n    if (c.media === 'TEXT') return { ctl: 'pass', carry: c };\n    return req('GET', `${base(j, 'https://graph.threads.net/v1.0')}/${cid}`, { qs: { fields: 'status,error_message' }, wait: c.media === 'VIDEO' ? 30 : 5, carry: c }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "93215ffa-bcc4-4780-a187-d36a1d132425",
+      "position": [
+        1610,
+        0
+      ]
+    },
+    {
+      "name": "Route 1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "ef202260-8b06-4fff-abde-2dd0258104e5",
+      "position": [
+        1840,
+        0
+      ]
+    },
+    {
+      "name": "Wait 1",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "d968331d-5244-414d-a6b0-cc1ec7eb0a70",
+      "position": [
+        2070,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "0ec8baa5-236c-4dc8-a0b6-d560f8e0912e",
+      "position": [
+        2300,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "8ff30b40-802e-4990-aad0-9dd55d4b7bf0",
+      "position": [
+        2530,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Threads account 1) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "1af2a808-52b5-44f3-a87b-b88491ae7481",
+      "position": [
+        2530,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Threads account 2) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "89f45d1a-cfe4-4c71-aa84-90be0b9cf1e4",
+      "position": [
+        2530,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Threads account 3) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "aae1e568-e123-4b3d-a447-58550605729b",
+      "position": [
+        2530,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Threads account 4) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "04ac3de0-6e27-4575-a01f-24ffe4705ff2",
+      "position": [
+        2530,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Threads account 5) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "584a1183-beb3-44de-a0f6-a52d4f7f82c9",
+      "position": [
+        2530,
+        150
+      ]
+    },
+    {
+      "name": "Build 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 1').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const c = last.carry; if (c.media !== 'TEXT') { const e = httpError(prev, last); if (e) return failFrom(e); const st = prev.body.status; if (st === 'IN_PROGRESS') return fail('media_processing', 'Threads is still processing the media; will retry later', true); if (st !== 'FINISHED') return fail('media_rejected', `Threads media status: ${st} ${prev.body.error_message || ''}`); }\n    return req('POST', `${base(j, 'https://graph.threads.net/v1.0')}/${j.params.threads_user_id || 'me'}/threads_publish`, { qs: { creation_id: c.creation_id }, commit: true, carry: c }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "574d6325-7757-450a-aeab-3f831bf75ee6",
+      "position": [
+        2760,
+        0
+      ]
+    },
+    {
+      "name": "Route 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "6c61dd45-7f61-4fad-a0b9-9ef57ba7d773",
+      "position": [
+        2990,
+        0
+      ]
+    },
+    {
+      "name": "Wait 2",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "488e72db-21c4-403e-a16c-e6c94ca4c164",
+      "position": [
+        3220,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "4c460b61-f96a-40df-a389-51c93bc3867a",
+      "position": [
+        3450,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "43fae940-6289-4957-a3e3-e6bcab712e5c",
+      "position": [
+        3680,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Threads account 1) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "b15c280c-b2ed-4764-a6de-48ccff73c810",
+      "position": [
+        3680,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Threads account 2) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "a109e704-b2ff-4874-ae7a-4b700c66d729",
+      "position": [
+        3680,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Threads account 3) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "28462c2a-59d0-4a11-acf8-caf57419983e",
+      "position": [
+        3680,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Threads account 4) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "735a30e0-2a2c-4edd-a206-c7561af23057",
+      "position": [
+        3680,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Threads account 5) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "8e91c505-584b-4d09-aa83-13880c77e55e",
+      "position": [
+        3680,
+        150
+      ]
+    },
+    {
+      "name": "Build 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 2').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const e = httpError(prev, last); if (e) return failFrom(e); const id = prev.body.id; return req('GET', `${base(j, 'https://graph.threads.net/v1.0')}/${id}`, { qs: { fields: 'permalink' }, carry: { ...last.carry, media_id: id } }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "e4ba1e17-e273-4044-a6a4-a45b12be1b5f",
+      "position": [
+        3910,
+        0
+      ]
+    },
+    {
+      "name": "Route 3",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "d7197257-9896-4ce2-ab8f-d75e8a37b432",
+      "position": [
+        4140,
+        0
+      ]
+    },
+    {
+      "name": "Wait 3",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "b08c74c0-ce85-42a6-a530-3ef814833026",
+      "position": [
+        4370,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 3",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "58bc6cab-d30e-4579-a8b0-7cfc7690265f",
+      "position": [
+        4600,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "7c761b1a-d8f1-425a-a91b-b856d51c111d",
+      "position": [
+        4830,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Threads account 1) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "9f129291-0658-4d74-ad64-df91a6056d35",
+      "position": [
+        4830,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Threads account 2) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "cff95c4e-67e4-48a4-a06a-e6778c12e0d7",
+      "position": [
+        4830,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Threads account 3) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "816ed898-6d94-463b-a082-6dae32eee27d",
+      "position": [
+        4830,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Threads account 4) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "768aeffa-e35b-46b2-a480-25b17341dc8f",
+      "position": [
+        4830,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Threads account 5) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "26017ba5-4769-4dc1-a618-98a0086c06ab",
+      "position": [
+        4830,
+        150
+      ]
+    },
+    {
+      "name": "Build 4",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 3').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => done({ post_id: last.carry.media_id, post_url: prev && prev.statusCode >= 200 && prev.statusCode < 300 && prev.body ? prev.body.permalink : '', note: prev && prev.statusCode >= 300 ? 'published; permalink unavailable' : undefined }))(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "ba80e7e8-2e59-4dc0-a735-bc1668089922",
+      "position": [
+        5060,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare": {
+      "main": [
+        [
+          {
+            "node": "Build 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 0": {
+      "main": [
+        [
+          {
+            "node": "Route 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 0": {
+      "main": [
+        [
+          {
+            "node": "Wait 0",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 0": {
+      "main": [
+        [
+          {
+            "node": "Slot 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 0": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Threads account 1) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Threads account 2) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Threads account 3) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Threads account 4) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Threads account 5) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 0": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Threads account 1) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Threads account 2) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Threads account 3) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Threads account 4) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Threads account 5) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 1": {
+      "main": [
+        [
+          {
+            "node": "Route 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 1": {
+      "main": [
+        [
+          {
+            "node": "Wait 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 1": {
+      "main": [
+        [
+          {
+            "node": "Slot 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Threads account 1) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Threads account 2) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Threads account 3) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Threads account 4) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Threads account 5) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 1": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Threads account 1) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Threads account 2) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Threads account 3) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Threads account 4) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Threads account 5) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 2": {
+      "main": [
+        [
+          {
+            "node": "Route 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 2": {
+      "main": [
+        [
+          {
+            "node": "Wait 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2": {
+      "main": [
+        [
+          {
+            "node": "Slot 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Threads account 1) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Threads account 2) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Threads account 3) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Threads account 4) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Threads account 5) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 2": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Threads account 1) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Threads account 2) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Threads account 3) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Threads account 4) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Threads account 5) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 3": {
+      "main": [
+        [
+          {
+            "node": "Route 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 3": {
+      "main": [
+        [
+          {
+            "node": "Wait 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 3": {
+      "main": [
+        [
+          {
+            "node": "Slot 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Threads account 1) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Threads account 2) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Threads account 3) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Threads account 4) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Threads account 5) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 3": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Threads account 1) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Threads account 2) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Threads account 3) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Threads account 4) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Threads account 5) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 4": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

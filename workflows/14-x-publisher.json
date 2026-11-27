@@ -1,0 +1,1496 @@
+{
+  "id": "smwf000000000014",
+  "name": "SM 05 X Publisher",
+  "nodes": [
+    {
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "ef5e33bc-0745-423b-a6c5-050dd8541519",
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const j = $input.first().json; return [{ json: { ctl: 'start', job: j } }];"
+      },
+      "id": "11a324aa-4aa4-4daa-a131-366269b8ec25",
+      "position": [
+        230,
+        0
+      ]
+    },
+    {
+      "name": "Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; const job = it.job || {};\nconst base = { job_id: job.job_id, row_id: job.row_id, platform: job.platform, account_key: job.account_key };\nif (it.ctl === 'done') return [{ json: { ...base, ok: true, post_id: String((it.result && it.result.post_id) || ''), post_url: (it.result && it.result.post_url) || '', note: (it.result && it.result.note) || '' } }];\nconst e = it.ctl === 'fail' ? it.error : { code: 'internal', message: 'unexpected state ' + it.ctl, retryable: false };\nreturn [{ json: { ...base, ok: false, error_code: e.code, error_message: e.message, retryable: !!e.retryable } }];"
+      },
+      "id": "32b33c07-5c0d-4408-add6-d749a334cf63",
+      "position": [
+        4140,
+        380
+      ]
+    },
+    {
+      "name": "Build 0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = { carry: {} };\nconst prev = null;\nconst out = (j => { if (j.format === 'video') return unsupported('X', 'video (needs chunked media upload, not implemented)'); if (j.format === 'image') { const o = one(j, 'X'); if (o) return o; return req('GET', j.media_urls[0], { carry: { image: true } }); } return pass({}); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "a3836c9b-5f5d-4adf-a516-4b9a703b34f4",
+      "position": [
+        460,
+        0
+      ]
+    },
+    {
+      "name": "Route 0",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "0eeb3c09-04d0-4ab7-a2b5-eb83343de869",
+      "position": [
+        690,
+        0
+      ]
+    },
+    {
+      "name": "Wait 0",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "59b29db8-fa42-430b-aced-628d4dbf46a2",
+      "position": [
+        920,
+        -140
+      ]
+    },
+    {
+      "name": "Fetch 0",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.req.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          },
+          "timeout": 300000
+        }
+      },
+      "id": "52e7f60f-3ef7-4c4f-a25a-7a11f2f6a104",
+      "position": [
+        1150,
+        -140
+      ]
+    },
+    {
+      "name": "Build 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 0').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { if (!last.carry.image) return pass(last.carry); if (!prev || prev.error) return fail('media_download_failed', `could not download ${j.media_urls[0]}: ${prev && prev.error ? (prev.error.message || prev.error) : 'no data'}`, true);\n    return req('POST', `${base(j, 'https://api.x.com')}/2/media/upload`, { qs: undefined, carry: last.carry, body: { media_category: 'tweet_image' } }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "b1cd44f5-6c6e-43aa-a28f-4b7ae0e77af8",
+      "position": [
+        1380,
+        0
+      ]
+    },
+    {
+      "name": "Route 1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "22973f71-1b55-4da3-a00d-cf7e16a818f4",
+      "position": [
+        1610,
+        0
+      ]
+    },
+    {
+      "name": "Wait 1",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "f6fd6ad1-a1a9-4d16-ac2b-3ee165f222d6",
+      "position": [
+        1840,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "fa474f6b-62ed-494e-a8ad-c144f75196ae",
+      "position": [
+        2070,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "a469e849-37da-4ed2-a614-2958718fa9ff",
+      "position": [
+        2300,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (X account 1) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "media",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "media_category",
+              "value": "={{ $json.req.body.media_category }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "01de70d5-eef8-4341-ab69-ea587405e000",
+      "position": [
+        2300,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (X account 2) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "media",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "media_category",
+              "value": "={{ $json.req.body.media_category }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "df7b046f-e601-4dcf-abd1-9a0b1b0b3791",
+      "position": [
+        2300,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (X account 3) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "media",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "media_category",
+              "value": "={{ $json.req.body.media_category }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "b135c33c-fdc7-4485-a312-934d6d02e871",
+      "position": [
+        2300,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (X account 4) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "media",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "media_category",
+              "value": "={{ $json.req.body.media_category }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "42c15c38-ba2a-484f-afb0-2036fba06cb0",
+      "position": [
+        2300,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (X account 5) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "media",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "media_category",
+              "value": "={{ $json.req.body.media_category }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "be7a2b40-b259-4111-a4db-8131dac3829d",
+      "position": [
+        2300,
+        150
+      ]
+    },
+    {
+      "name": "Build 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 1').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { let media; if (last.carry.image) { const e = httpError(prev, last); if (e) return failFrom(e); const id = prev.body && prev.body.data && prev.body.data.id; if (!id) return fail('media_upload_failed', 'X did not return a media id'); media = { media_ids: [String(id)] }; }\n    const text = [j.text, j.format === 'link' ? j.link_url : ''].filter(Boolean).join(' '); if (!text && !media) return fail('empty_post', 'no text to post');\n    return req('POST', `${base(j, 'https://api.x.com')}/2/tweets`, { body: Object.assign({ text: text || undefined }, media ? { media } : {}), commit: true }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "6f0f146c-fa5a-4a79-a98e-5c3d25bbb024",
+      "position": [
+        2530,
+        0
+      ]
+    },
+    {
+      "name": "Route 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "b2eb44a7-466e-43d8-a886-a7f91aca0d8d",
+      "position": [
+        2760,
+        0
+      ]
+    },
+    {
+      "name": "Wait 2",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "3675a6d5-1a26-433e-afa4-f96b5cab0267",
+      "position": [
+        2990,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "a2fb3068-9064-4013-a5cd-5487fb7d684f",
+      "position": [
+        3220,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "517238cc-4064-49ef-a304-fba05f8e3c7c",
+      "position": [
+        3450,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (X account 1) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "54220491-f998-4e4c-abae-489ce0acc934",
+      "position": [
+        3450,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (X account 2) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "ff37c964-f73b-4a33-ad8e-06d8d6915ea8",
+      "position": [
+        3450,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (X account 3) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "615f49df-8386-437c-a0d6-a1b4742a5647",
+      "position": [
+        3450,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (X account 4) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "e8b58c16-4f86-4322-ab7d-42f3deb5dc92",
+      "position": [
+        3450,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (X account 5) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "ce57382b-6723-4f51-ab5f-fcb667a0ec76",
+      "position": [
+        3450,
+        150
+      ]
+    },
+    {
+      "name": "Build 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 2').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const e = httpError(prev, last); if (e) return failFrom(e); const id = prev.body.data.id; return done({ post_id: id, post_url: `https://x.com/i/web/status/${id}` }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "d83f4938-f6c0-447c-adfa-9bcf36e3ee53",
+      "position": [
+        3680,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare": {
+      "main": [
+        [
+          {
+            "node": "Build 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 0": {
+      "main": [
+        [
+          {
+            "node": "Route 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 0": {
+      "main": [
+        [
+          {
+            "node": "Wait 0",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 0": {
+      "main": [
+        [
+          {
+            "node": "Fetch 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch 0": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 1": {
+      "main": [
+        [
+          {
+            "node": "Route 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 1": {
+      "main": [
+        [
+          {
+            "node": "Wait 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 1": {
+      "main": [
+        [
+          {
+            "node": "Slot 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (X account 1) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (X account 2) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (X account 3) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (X account 4) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (X account 5) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 1": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (X account 1) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (X account 2) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (X account 3) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (X account 4) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (X account 5) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 2": {
+      "main": [
+        [
+          {
+            "node": "Route 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 2": {
+      "main": [
+        [
+          {
+            "node": "Wait 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2": {
+      "main": [
+        [
+          {
+            "node": "Slot 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (X account 1) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (X account 2) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (X account 3) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (X account 4) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (X account 5) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 2": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (X account 1) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (X account 2) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (X account 3) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (X account 4) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (X account 5) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 3": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

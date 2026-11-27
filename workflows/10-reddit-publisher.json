@@ -1,0 +1,685 @@
+{
+  "id": "smwf000000000010",
+  "name": "SM 01 Reddit Publisher",
+  "nodes": [
+    {
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "89087bc2-bf86-41f1-ae2e-a35a6cad8a8e",
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const j = $input.first().json; return [{ json: { ctl: 'start', job: j } }];"
+      },
+      "id": "242b43c2-66fc-4839-a096-60900811c536",
+      "position": [
+        230,
+        0
+      ]
+    },
+    {
+      "name": "Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; const job = it.job || {};\nconst base = { job_id: job.job_id, row_id: job.row_id, platform: job.platform, account_key: job.account_key };\nif (it.ctl === 'done') return [{ json: { ...base, ok: true, post_id: String((it.result && it.result.post_id) || ''), post_url: (it.result && it.result.post_url) || '', note: (it.result && it.result.note) || '' } }];\nconst e = it.ctl === 'fail' ? it.error : { code: 'internal', message: 'unexpected state ' + it.ctl, retryable: false };\nreturn [{ json: { ...base, ok: false, error_code: e.code, error_message: e.message, retryable: !!e.retryable } }];"
+      },
+      "id": "f06305c2-d64a-4ed9-a38b-34e253aa9b59",
+      "position": [
+        1840,
+        380
+      ]
+    },
+    {
+      "name": "Build 0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = { carry: {} };\nconst prev = null;\nconst out = (j => { if (j.format === 'image' || j.format === 'video') return unsupported('Reddit', j.format); const m = needP(j, 'subreddit', '(subreddit name, without r/)'); if (m) return m; if (!j.title) return fail('missing_param', 'Reddit needs a title (the \"title\" column)');\n    const f = { api_type: 'json', sr: j.params.subreddit.replace(/^\\/?r\\//i, ''), title: j.title, resubmit: /^(true|yes|1)$/i.test(j.params.resubmit || '') ? 'true' : 'false' };\n    if (j.params.flair_id) f.flair_id = j.params.flair_id;\n    if (j.format === 'link') { f.kind = 'link'; f.url = j.link_url; } else { f.kind = 'self'; f.text = j.text; }\n    return req('POST', `${base(j, 'https://oauth.reddit.com')}/api/submit`, { form: Object.keys(f).filter(k => f[k] !== undefined).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(f[k])).join('&'), headers: { 'User-Agent': 'n8n-social-automation/1.0' }, commit: true }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "f9192855-39e5-4e17-a8de-b1eb055e19e0",
+      "position": [
+        460,
+        0
+      ]
+    },
+    {
+      "name": "Route 0",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "3ae79fd3-5ad4-4cc9-a5a6-942e2e60a3be",
+      "position": [
+        690,
+        0
+      ]
+    },
+    {
+      "name": "Wait 0",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "54f3a6c8-b57e-45ff-a69a-6387c3d2e633",
+      "position": [
+        920,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 0",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "1a500a6d-ab4e-4e59-ac7a-5dc8d8c28fe2",
+      "position": [
+        1150,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "22765f0f-e1f8-4932-abeb-058a910b35d0",
+      "position": [
+        1380,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Reddit account 1) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "redditOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "specifyBody": "string",
+        "body": "={{ $json.req.form }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "a358a86a-5079-40e4-a489-00e0d3e111c0",
+      "position": [
+        1380,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Reddit account 2) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "redditOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "specifyBody": "string",
+        "body": "={{ $json.req.form }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "c1f51919-0e70-448e-a9c6-d988348b5282",
+      "position": [
+        1380,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Reddit account 3) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "redditOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "specifyBody": "string",
+        "body": "={{ $json.req.form }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "9b2bd11d-b352-4b9e-a852-dc0f4c537f5a",
+      "position": [
+        1380,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Reddit account 4) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "redditOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "specifyBody": "string",
+        "body": "={{ $json.req.form }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "df0b9c3e-08ae-402b-ab19-bbac22c50d03",
+      "position": [
+        1380,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Reddit account 5) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "redditOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "specifyBody": "string",
+        "body": "={{ $json.req.form }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "94780dff-936b-4984-a1bf-5106e1cc5ecc",
+      "position": [
+        1380,
+        150
+      ]
+    },
+    {
+      "name": "Build 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 0').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const e = httpError(prev, last); if (e) return failFrom(e); const errs = prev.body && prev.body.json && prev.body.json.errors;\n    if (errs && errs.length) { const c = String(errs[0][0]); return fail('reddit_' + c.toLowerCase(), `${c}: ${errs[0][1] || ''}`, c === 'RATELIMIT'); }\n    const d = prev.body.json.data; return done({ post_id: d.name || d.id, post_url: d.url }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "d8c5c816-1c69-48d3-a5ba-f244ffd1cc80",
+      "position": [
+        1610,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare": {
+      "main": [
+        [
+          {
+            "node": "Build 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 0": {
+      "main": [
+        [
+          {
+            "node": "Route 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 0": {
+      "main": [
+        [
+          {
+            "node": "Wait 0",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 0": {
+      "main": [
+        [
+          {
+            "node": "Slot 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 0": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Reddit account 1) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Reddit account 2) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Reddit account 3) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Reddit account 4) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Reddit account 5) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 0": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Reddit account 1) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Reddit account 2) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Reddit account 3) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Reddit account 4) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Reddit account 5) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 1": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

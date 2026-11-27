@@ -1,0 +1,4 @@
+id,status,publish_at,platforms,accounts,format,title,caption,description,hashtags,media_urls,link_url,caption_instagram,caption@fb_main,subreddit,privacy,tags,attempts,next_attempt_at,results,last_error,published_urls,updated_at
+demo-1,draft,2026-12-01 09:00,facebook;instagram,ALL,,Launch day,Our new product is live!,,#launch #new,https://example.com/media/photo1.jpg,,Launch day on IG!,Special note for the main page,,,,,,,,,
+demo-2,draft,2026-12-01 10:00,reddit,rd_main,,My post title,Body text of the post,,,,,,,,test,,,,,,,
+demo-3,draft,2026-12-02 12:00,youtube;tiktok,ALL,video,My video,Watch this,Longer YouTube description,#video,https://example.com/media/clip.mp4,,,,,public,tag1;tag2,,,,,,

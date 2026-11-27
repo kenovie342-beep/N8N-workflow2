@@ -1,0 +1,2398 @@
+{
+  "id": "smwf000000000012",
+  "name": "SM 03 Instagram Publisher",
+  "nodes": [
+    {
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "2ac57984-5b1d-45bc-a370-ae0be40ceb5c",
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const j = $input.first().json; return [{ json: { ctl: 'start', job: j } }];"
+      },
+      "id": "7691ff30-d8ba-4e56-abf5-fc606be1f59d",
+      "position": [
+        230,
+        0
+      ]
+    },
+    {
+      "name": "Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; const job = it.job || {};\nconst base = { job_id: job.job_id, row_id: job.row_id, platform: job.platform, account_key: job.account_key };\nif (it.ctl === 'done') return [{ json: { ...base, ok: true, post_id: String((it.result && it.result.post_id) || ''), post_url: (it.result && it.result.post_url) || '', note: (it.result && it.result.note) || '' } }];\nconst e = it.ctl === 'fail' ? it.error : { code: 'internal', message: 'unexpected state ' + it.ctl, retryable: false };\nreturn [{ json: { ...base, ok: false, error_code: e.code, error_message: e.message, retryable: !!e.retryable } }];"
+      },
+      "id": "c14914fd-b381-4ab9-a11b-abbb0b25562b",
+      "position": [
+        5290,
+        380
+      ]
+    },
+    {
+      "name": "Build 0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = { carry: {} };\nconst prev = null;\nconst out = (j => { const m = needP(j, 'ig_user_id', '(Instagram Business account ID)'); if (m) return m; if (j.format === 'text' || j.format === 'link') return unsupported('Instagram', j.format + '-only'); const o = one(j, 'Instagram'); if (o) return o; const B = base(j, 'https://graph.facebook.com/v21.0');\n    const body = j.format === 'image' ? { image_url: j.media_urls[0], caption: j.text } : { media_type: 'REELS', video_url: j.media_urls[0], caption: j.text, share_to_feed: true };\n    return req('POST', `${B}/${j.params.ig_user_id}/media`, { body, carry: { video: j.format === 'video' } }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "e76607ac-0099-42c5-a564-171fe6f319dd",
+      "position": [
+        460,
+        0
+      ]
+    },
+    {
+      "name": "Route 0",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "af82f795-4b16-4bf0-a8dd-cb46dbea3659",
+      "position": [
+        690,
+        0
+      ]
+    },
+    {
+      "name": "Wait 0",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "390aa05e-d5f9-4d9c-a4ad-6413ba1ea539",
+      "position": [
+        920,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 0",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "80b17fd6-a440-4e14-aec2-fcaef1af5c64",
+      "position": [
+        1150,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "c721d4f3-a27a-4f05-afa9-c6eef495711b",
+      "position": [
+        1380,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Instagram account 1) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "02e63fd6-dc3e-4cc4-a6a5-4309b8d86ac0",
+      "position": [
+        1380,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Instagram account 2) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "63ef1d06-10d3-49d0-a6cd-01fca7358c26",
+      "position": [
+        1380,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Instagram account 3) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "392007f5-68f7-4bb6-a059-6d77e443dc4b",
+      "position": [
+        1380,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Instagram account 4) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "767a274c-05d1-4a6b-a4f5-fa921722acec",
+      "position": [
+        1380,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Instagram account 5) S1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "7aae7ca8-75d1-4891-a877-3030063f5225",
+      "position": [
+        1380,
+        150
+      ]
+    },
+    {
+      "name": "Build 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 0').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const e = httpError(prev, last); if (e) return failFrom(e); const cid = prev.body.id; return req('GET', `${base(j, 'https://graph.facebook.com/v21.0')}/${cid}`, { qs: { fields: 'status_code' }, wait: last.carry.video ? 30 : 3, carry: { ...last.carry, creation_id: cid } }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "e53b9d04-78dd-45bf-a4c4-6cde008141e3",
+      "position": [
+        1610,
+        0
+      ]
+    },
+    {
+      "name": "Route 1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "adaddf35-d419-4c76-af5d-51a9d4d9f0c2",
+      "position": [
+        1840,
+        0
+      ]
+    },
+    {
+      "name": "Wait 1",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "a50ee71e-e15d-4ecb-aa46-526d7616de96",
+      "position": [
+        2070,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "993d680b-e91d-411a-a2e7-e3936772f188",
+      "position": [
+        2300,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "614d77b9-1968-4459-a73b-36d8b87a03ab",
+      "position": [
+        2530,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Instagram account 1) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "b717c1d2-143a-4cf0-a8d8-9f2c892cef38",
+      "position": [
+        2530,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Instagram account 2) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "2e485c86-c608-4f87-a654-163dffc1613d",
+      "position": [
+        2530,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Instagram account 3) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "56882554-bbec-4387-a67f-4e7ac32ba119",
+      "position": [
+        2530,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Instagram account 4) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "972bfcb7-60c0-437a-ad80-8c93f974b195",
+      "position": [
+        2530,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Instagram account 5) S2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "39eca3c9-558a-4bd5-a163-d83390c444b4",
+      "position": [
+        2530,
+        150
+      ]
+    },
+    {
+      "name": "Build 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 1').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const e = httpError(prev, last); if (e) return failFrom(e); const sc = prev.body.status_code;\n    if (sc === 'IN_PROGRESS') return fail('media_processing', 'Instagram is still processing the media; will retry later', true);\n    if (sc !== 'FINISHED') return fail('media_rejected', `Instagram media status: ${sc}`);\n    return req('POST', `${base(j, 'https://graph.facebook.com/v21.0')}/${j.params.ig_user_id}/media_publish`, { body: { creation_id: last.carry.creation_id }, commit: true, carry: last.carry }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "8d936532-33cf-48df-a5dd-c32a27f61cee",
+      "position": [
+        2760,
+        0
+      ]
+    },
+    {
+      "name": "Route 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "5ff6e50b-de54-42ab-ac41-79304bd8a72b",
+      "position": [
+        2990,
+        0
+      ]
+    },
+    {
+      "name": "Wait 2",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "0f6ba713-4c99-49d5-ae83-166baee61a7e",
+      "position": [
+        3220,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "29e625c7-63b6-4c2e-a414-5849414e53bf",
+      "position": [
+        3450,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "019f98a2-26f4-474a-a8f9-5f72a8119479",
+      "position": [
+        3680,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Instagram account 1) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "557b838e-42f8-4ca4-a8f2-2ca085d51200",
+      "position": [
+        3680,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Instagram account 2) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "e979604c-cd2c-4c96-a09a-91a500555a1b",
+      "position": [
+        3680,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Instagram account 3) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "46565383-1daf-4fb5-afaf-dd0287c65570",
+      "position": [
+        3680,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Instagram account 4) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "017ce354-abce-4e37-a673-f7844f3a1217",
+      "position": [
+        3680,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Instagram account 5) S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body || {}) }}"
+      },
+      "onError": "continueRegularOutput",
+      "id": "5db30ef4-f3ee-4290-a7fe-e8c3f88f852f",
+      "position": [
+        3680,
+        150
+      ]
+    },
+    {
+      "name": "Build 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 2').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => { const e = httpError(prev, last); if (e) return failFrom(e); const mid = prev.body.id; return req('GET', `${base(j, 'https://graph.facebook.com/v21.0')}/${mid}`, { qs: { fields: 'permalink' }, carry: { ...last.carry, media_id: mid } }); })(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "01d37f60-15e5-4a8f-a1ab-416133b2187d",
+      "position": [
+        3910,
+        0
+      ]
+    },
+    {
+      "name": "Route 3",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "req",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "req"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.ctl }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "pass"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "2bdaa338-ad77-4933-a008-4bc2feb60094",
+      "position": [
+        4140,
+        0
+      ]
+    },
+    {
+      "name": "Wait 3",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.wait || 0 }}",
+        "unit": "seconds"
+      },
+      "id": "206ba693-22e7-4d58-a75a-0d9ea55ca515",
+      "position": [
+        4370,
+        -140
+      ]
+    },
+    {
+      "name": "Slot 3",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 3"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 4"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.slot }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renamedOutput": true,
+              "outputKey": "slot 5"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "3099101d-a4ac-4d4e-a17a-36aa3e40cf11",
+      "position": [
+        4600,
+        -140
+      ]
+    },
+    {
+      "name": "No slot 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const it = $input.first().json; return [{ json: { ctl: 'fail', job: it.job, error: { code: 'no_credential_slot', message: 'Account \"' + it.job.account_key + '\" has slot ' + it.job.slot + ', but this workflow only has slots 1-5. Set a valid slot in the Accounts sheet.', retryable: false } } }];"
+      },
+      "id": "1b6aafec-1a62-4b53-a3ac-ef1d39e49bc3",
+      "position": [
+        4830,
+        200
+      ]
+    },
+    {
+      "name": "Slot 1 (Instagram account 1) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "8a085cda-be86-4abc-afdc-eb915cf5a5d7",
+      "position": [
+        4830,
+        -210
+      ]
+    },
+    {
+      "name": "Slot 2 (Instagram account 2) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "f55259c5-ca0c-4a57-aa7a-6a4b443a6879",
+      "position": [
+        4830,
+        -120
+      ]
+    },
+    {
+      "name": "Slot 3 (Instagram account 3) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "bca0fb58-6ff9-42c9-a8f9-0311719f2395",
+      "position": [
+        4830,
+        -30
+      ]
+    },
+    {
+      "name": "Slot 4 (Instagram account 4) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "f132a7c7-2f4d-4dc3-ae63-55bc1d36d0f4",
+      "position": [
+        4830,
+        60
+      ]
+    },
+    {
+      "name": "Slot 5 (Instagram account 5) S4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "={{ $json.req.method }}",
+        "url": "={{ $json.req.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.req.qs || {}) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.req.headers || {}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        },
+        "sendBody": false
+      },
+      "onError": "continueRegularOutput",
+      "id": "b9b7b9c1-e0db-44c3-aa5e-8a5d0e0ab140",
+      "position": [
+        4830,
+        150
+      ]
+    },
+    {
+      "name": "Build 4",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const base = (j, def, tag) => (j._base ? `${j._base}${tag ? '/' + tag : ''}` : def); // _base is only set by the test harness\nconst req = (method, url, o = {}) => ({ ctl: 'req', req: { method, url, qs: o.qs, body: o.body, form: o.form, headers: o.headers, commit: !!o.commit }, wait: o.wait || 0, carry: o.carry || {} });\nconst pass = carry => ({ ctl: 'pass', carry: carry || {} });\nconst fail = (code, message, retryable = false) => ({ ctl: 'fail', error: { code, message, retryable } });\nconst done = (result, carry) => ({ ctl: 'done', result, carry: carry || {} });\nconst msgOf = b => { try { if (!b) return ''; if (typeof b === 'string') return b.slice(0, 300); const m = (b.error && (b.error.message || b.error.error_user_msg || (typeof b.error === 'string' && b.error))) || b.message || b.detail || (b.errors && b.errors[0] && (b.errors[0].message || b.errors[0])) || b.error_description || (b.meta && b.meta.msg) || JSON.stringify(b); return String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300); } catch { return 'unreadable error body'; } };\nconst AUTH_HELP = 'Access token expired or invalid: reconnect/refresh the credential for this account in n8n.';\n\n// null when prev is a 2xx response, else {code,message,retryable}\nfunction httpError(prev, last) {\n  const commit = !!(last && last.req && last.req.commit);\n  if (!prev) return { code: 'no_response', message: 'no response from previous step', retryable: false };\n  if (prev.error) { const m = String((prev.error && (prev.error.message || prev.error)) || 'network error').slice(0, 300); return /credential/i.test(m) ? { code: 'config_error', message: m + ' (assign a credential to this account\\'s slot node in the platform workflow)', retryable: false } : { code: 'network_error', message: m, retryable: !commit }; }\n  const s = prev.statusCode; if (s >= 200 && s < 300) return null;\n  const m = msgOf(prev.body); const raw = JSON.stringify(prev.body || '');\n  if (s === 401 || (s >= 400 && s < 500 && /\"code\":\\s*190|invalid_token|expired|OAuthException|Invalid OAuth/i.test(raw))) return { code: 'auth_expired', message: `${AUTH_HELP} (${m})`, retryable: false };\n  if (s === 429) return { code: 'rate_limited', message: m || 'rate limited', retryable: true };\n  if (s >= 500) return { code: 'server_error', message: m || `HTTP ${s}`, retryable: !commit };\n  if (s === 403) return { code: 'forbidden', message: `Not permitted (missing scope/permission or app approval?): ${m}`, retryable: false };\n  return { code: 'api_rejected', message: `HTTP ${s}: ${m}`, retryable: false };\n}\nconst failFrom = e => ({ ctl: 'fail', error: e });\nconst one = (j, what) => (j.media_urls.length === 1 ? null : fail('unsupported', `${what}: exactly one media URL is supported per post (got ${j.media_urls.length})`));\nconst unsupported = (p, f) => fail('unsupported', `${p} does not support ${f} posts through this workflow`);\nconst needP = (j, k, hint) => (j.params[k] ? null : fail('missing_param', `\"${k}\" is required for this account ${hint || '(set it in the Accounts sheet or the content row)'}`));\nconst mime = u => { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); const e = m ? m[1].toLowerCase() : ''; return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/mp4', webm: 'video/webm' }[e] || 'application/octet-stream'; };\nconst bare = s => String(s || '').replace(/^#/, '');\n\n\nconst job = $('Prepare').first().json.job; const inp = $input.first().json; const bin = $input.first().binary;\nconst last = $('Build 3').first().json;\nconst prev = (inp.ctl === 'pass' ? inp.prev : inp);\nconst out = ((j, prev, last) => done({ post_id: last.carry.media_id, post_url: prev && prev.statusCode >= 200 && prev.statusCode < 300 && prev.body ? prev.body.permalink : '', note: prev && prev.statusCode >= 300 ? 'published; permalink unavailable' : undefined }))(job, prev, last);\nif (out.ctl === 'pass') out.prev = prev;\nout.carry = Object.assign({}, last.carry || {}, out.carry || {});\nconst res = { json: { ...out, job, slot: job.slot } }; if (bin) res.binary = bin; return [res];"
+      },
+      "id": "94f2b747-14d7-4e3f-a811-b37352b896da",
+      "position": [
+        5060,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare": {
+      "main": [
+        [
+          {
+            "node": "Build 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 0": {
+      "main": [
+        [
+          {
+            "node": "Route 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 0": {
+      "main": [
+        [
+          {
+            "node": "Wait 0",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 0": {
+      "main": [
+        [
+          {
+            "node": "Slot 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 0": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Instagram account 1) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Instagram account 2) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Instagram account 3) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Instagram account 4) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Instagram account 5) S1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 0": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Instagram account 1) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Instagram account 2) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Instagram account 3) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Instagram account 4) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Instagram account 5) S1": {
+      "main": [
+        [
+          {
+            "node": "Build 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 1": {
+      "main": [
+        [
+          {
+            "node": "Route 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 1": {
+      "main": [
+        [
+          {
+            "node": "Wait 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 1": {
+      "main": [
+        [
+          {
+            "node": "Slot 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Instagram account 1) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Instagram account 2) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Instagram account 3) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Instagram account 4) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Instagram account 5) S2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 1": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Instagram account 1) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Instagram account 2) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Instagram account 3) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Instagram account 4) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Instagram account 5) S2": {
+      "main": [
+        [
+          {
+            "node": "Build 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 2": {
+      "main": [
+        [
+          {
+            "node": "Route 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 2": {
+      "main": [
+        [
+          {
+            "node": "Wait 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2": {
+      "main": [
+        [
+          {
+            "node": "Slot 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Instagram account 1) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Instagram account 2) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Instagram account 3) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Instagram account 4) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Instagram account 5) S3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 2": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Instagram account 1) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Instagram account 2) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Instagram account 3) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Instagram account 4) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Instagram account 5) S3": {
+      "main": [
+        [
+          {
+            "node": "Build 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 3": {
+      "main": [
+        [
+          {
+            "node": "Route 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route 3": {
+      "main": [
+        [
+          {
+            "node": "Wait 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 3": {
+      "main": [
+        [
+          {
+            "node": "Slot 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3": {
+      "main": [
+        [
+          {
+            "node": "Slot 1 (Instagram account 1) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 2 (Instagram account 2) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 3 (Instagram account 3) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 4 (Instagram account 4) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slot 5 (Instagram account 5) S4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No slot 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No slot 3": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 1 (Instagram account 1) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 2 (Instagram account 2) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 3 (Instagram account 3) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 4 (Instagram account 4) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot 5 (Instagram account 5) S4": {
+      "main": [
+        [
+          {
+            "node": "Build 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 4": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

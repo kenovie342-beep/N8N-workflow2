@@ -1,0 +1,192 @@
+{
+  "id": "smwf000000000002",
+  "name": "SM TEST Pipeline (no Sheets)",
+  "nodes": [
+    {
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sm-test-run",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "webhookId": "bb97a56d-a412-4760-adaa-9311d26b355d",
+      "id": "06b5dbd9-3da9-4e05-a6a1-c51555fd067e",
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "Build",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Pure logic for the Sheets -> platforms pipeline. Embedded verbatim into n8n Code nodes by scripts/build-workflows.js.\n// It never writes or rewrites content: it only selects, routes, concatenates the user's own fields and records results.\n\nconst PLATFORMS = ['reddit', 'facebook', 'instagram', 'youtube', 'x', 'linkedin', 'threads', 'pinterest', 'tumblr', 'tiktok'];\nconst ELIGIBLE = ['ready', 'scheduled', 'pending', 'retry'];\nconst VIDEO_EXT = ['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'], IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp'];\nconst DEFAULTS = { timezone: 'UTC', max_attempts: 3, backoff_minutes: [5, 15, 60], append_hashtags: true, max_rows_per_run: 20 };\n\nconst norm = v => (v === undefined || v === null ? '' : String(v).trim());\nconst csv = v => norm(v).split(/[,;\\n]+/).map(s => s.trim()).filter(Boolean);\nconst truthy = (v, def) => { const s = norm(v).toLowerCase(); return s === '' ? def : !['false', '0', 'no', 'off', 'disabled'].includes(s); };\nconst lowerKeys = o => { const r = {}; Object.keys(o || {}).forEach(k => { r[String(k).trim().toLowerCase()] = o[k]; }); return r; };\n\n// ---- time -------------------------------------------------------------------\nfunction tzOffsetMs(ms, tz) {\n  const p = {}; new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(ms)).forEach(x => { p[x.type] = x.value; });\n  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000;\n}\nfunction wallToUtc(y, mo, d, h, mi, s, tz) { const g = Date.UTC(y, mo - 1, d, h, mi, s); let r = g - tzOffsetMs(g, tz); r = g - tzOffsetMs(r, tz); return r; }\n// Accepts ISO with offset/Z, \"YYYY-MM-DD[ T]HH:mm[:ss]\" or a date (wall time in tz), or a Sheets serial number.\nfunction parseWhen(v, tz) {\n  const s = norm(v); if (!s) return null;\n  if (/^\\d+(\\.\\d+)?$/.test(s) && +s > 20000 && +s < 80000) { const ms = Math.round((+s - 25569) * 86400000); const d = new Date(ms); return wallToUtc(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), tz); }\n  if (/(Z|[+-]\\d{2}:?\\d{2})$/.test(s) && /\\d{4}-\\d{2}-\\d{2}[T ]\\d/.test(s)) { const t = Date.parse(s.replace(' ', 'T')); return isNaN(t) ? NaN : t; }\n  const m = /^(\\d{4})-(\\d{1,2})-(\\d{1,2})(?:[ T](\\d{1,2}):(\\d{2})(?::(\\d{2}))?)?$/.exec(s);\n  if (m) return wallToUtc(+m[1], +m[2], +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0), tz);\n  return NaN;\n}\n\n// ---- field resolution: field@account > field_platform > field > Accounts-sheet default ----\nfunction field(row, name, platform, account, acct) {\n  for (const k of [`${name}@${account}`, `${name}_${platform}`, name]) { if (norm(row[k]) !== '') return norm(row[k]); }\n  return acct && norm(acct[name]) !== '' ? norm(acct[name]) : '';\n}\nfunction extOf(u) { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); return m ? m[1].toLowerCase() : ''; }\nfunction detectFormat(explicit, urls, link) {\n  const e = norm(explicit).toLowerCase();\n  if (e && e !== 'auto') return ['text', 'image', 'video', 'link'].includes(e) ? { format: e } : { error: `format \"${e}\" is not text|image|video|link|auto` };\n  if (urls.length) {\n    const ex = urls.map(extOf);\n    if (ex.some(x => VIDEO_EXT.includes(x))) return { format: 'video' };\n    if (ex.every(x => IMAGE_EXT.includes(x))) return { format: 'image' };\n    return { error: 'cannot tell if media_urls are images or video from the file extension; set the format column' };\n  }\n  return { format: link ? 'link' : 'text' };\n}\nconst dedupeKey = (id, platform, account) => `${id}|${platform}|${account}`;\n\n// ---- jobs -----------------------------------------------------------------------\n// input: { content:[row], accounts:[row], log:[row], now:ms, config }\nfunction buildJobs(input) {\n  const cfg = Object.assign({}, DEFAULTS, input.config || {}); const now = input.now;\n  const accounts = {}; (input.accounts || []).forEach(r => { r = lowerKeys(r); const k = norm(r.account_key).toLowerCase(); if (k) accounts[k] = r; });\n  const done = new Set(); (input.log || []).forEach(r => { r = lowerKeys(r); if (norm(r.status).toLowerCase() === 'success') done.add(norm(r.dedupe_key)); });\n  const jobs = [], rowState = {}, skipped = [], seen = new Set(); let taken = 0;\n  for (const raw of input.content || []) {\n    const row = lowerKeys(raw); const id = norm(row.id);\n    if (!id) { skipped.push({ id: '', reason: 'row has no id' }); continue; }\n    if (seen.has(id)) { skipped.push({ id, reason: 'duplicate id in sheet; every row needs a unique id' }); continue; } seen.add(id);\n    const status = norm(row.status).toLowerCase();\n    if (!ELIGIBLE.includes(status)) { skipped.push({ id, reason: `status \"${status || '(blank)'}\" is not ready/scheduled/pending/retry` }); continue; }\n    const when = parseWhen(row.publish_at, cfg.timezone);\n    if (Number.isNaN(when)) { skipped.push({ id, reason: `publish_at \"${norm(row.publish_at)}\" not understood`, flag: 'bad_date' }); continue; }\n    if (when !== null && when > now) { skipped.push({ id, reason: 'not due yet' }); continue; }\n    if (status === 'retry' && norm(row.next_attempt_at)) { const na = parseWhen(row.next_attempt_at, 'UTC'); if (na && na > now) { skipped.push({ id, reason: 'waiting for retry backoff' }); continue; } }\n    if (taken >= cfg.max_rows_per_run) { skipped.push({ id, reason: 'over max_rows_per_run; next run' }); continue; }\n    taken++;\n    // targets\n    let plats = csv(row.platforms).map(s => s.toLowerCase()), accs = csv(row.accounts).map(s => s.toLowerCase());\n    const all = x => x.length === 1 && x[0] === 'all';\n    const enabled = Object.keys(accounts).filter(k => truthy(accounts[k].enabled, true));\n    let targets = []; const problems = [];\n    if (!plats.length && !accs.length) problems.push('no platforms or accounts given');\n    if (all(plats)) plats = PLATFORMS.filter(p => enabled.some(k => norm(accounts[k].platform).toLowerCase() === p));\n    if (!plats.length && accs.length && !all(accs)) plats = [...new Set(accs.map(k => norm((accounts[k] || {}).platform).toLowerCase()).filter(Boolean))];\n    plats.forEach(p => { if (!PLATFORMS.includes(p)) problems.push(`unknown platform \"${p}\"`); });\n    if (all(accs) || !accs.length) plats.filter(p => PLATFORMS.includes(p)).forEach(p => enabled.filter(k => norm(accounts[k].platform).toLowerCase() === p).forEach(k => targets.push([p, k])));\n    else accs.forEach(k => {\n      const a = accounts[k];\n      if (!a) { problems.push(`unknown account \"${k}\" (not in the Accounts sheet)`); return; }\n      if (!truthy(a.enabled, true)) { problems.push(`account \"${k}\" is disabled`); return; }\n      const p = norm(a.platform).toLowerCase();\n      if (plats.length && !plats.includes(p)) { problems.push(`account \"${k}\" is a ${p} account but platforms is ${plats.join('/')}`); return; }\n      targets.push([p, k]);\n    });\n    if (!targets.length && !problems.length) problems.push('no enabled account matches the requested platforms');\n    const state = { attempts: +norm(row.attempts) || 0, targets: [], problems };\n    targets.forEach(([p, k]) => {\n      const key = dedupeKey(id, p, k); const acct = accounts[k];\n      if (done.has(key)) { state.targets.push({ key, platform: p, account: k, state: 'already_done' }); return; }\n      const get = n => field(row, n, p, k, acct);\n      const urls = csv(get('media_urls')); const link = get('link_url'); const f = detectFormat(get('format'), urls, link);\n      const base = { key, platform: p, account: k };\n      if (f.error) { state.targets.push({ ...base, state: 'invalid', error: { code: 'bad_format', message: f.error, retryable: false } }); return; }\n      const caption = get('caption'), tags = get('hashtags');\n      const params = {}; Object.keys(row).forEach(c => { if (!/^(id|status|publish_at|platforms|accounts|attempts|next_attempt_at|results|last_error|published_urls|updated_at)$/.test(c) && !c.includes('@')) { const m = /^(.*)_(reddit|facebook|instagram|youtube|x|linkedin|threads|pinterest|tumblr|tiktok)$/.exec(c); if (!m) params[c] = get(c); else if (m[2] === p) params[m[1]] = get(m[1]); } });\n      Object.keys(acct).forEach(c => { if (params[c] === undefined || params[c] === '') params[c] = norm(acct[c]); });\n      const job = { job_id: key, row_id: id, platform: p, account_key: k, slot: parseInt(acct.slot, 10) || 0, format: f.format, title: get('title'), caption, description: get('description'), hashtags: tags, link_url: link, media_urls: urls, text: [caption, cfg.append_hashtags && tags ? tags : ''].filter(Boolean).join('\\n\\n'), params };\n      state.targets.push({ ...base, state: 'job' }); jobs.push(job);\n    });\n    rowState[id] = state;\n  }\n  return { jobs, rowState, skipped, preUpdates: Object.keys(rowState).filter(id => rowState[id].targets.some(t => t.state === 'job')).map(id => ({ id, status: 'publishing', updated_at: new Date(now).toISOString() })) };\n}\n\n// ---- results -> row updates + log lines ------------------------------------------------------\nfunction backoffMinutes(cfg, attempts) { const b = cfg.backoff_minutes || DEFAULTS.backoff_minutes; return b[Math.min(attempts, b.length) - 1] || b[b.length - 1]; }\nfunction finalize(input) {\n  const cfg = Object.assign({}, DEFAULTS, input.config || {}); const now = input.now; const iso = new Date(now).toISOString();\n  const byKey = {}; (input.results || []).forEach(r => { byKey[r.job_id] = r; });\n  const rowUpdates = [], logAppends = [];\n  Object.keys(input.rowState || {}).forEach(id => {\n    const st = input.rowState[id]; const lines = []; const urls = []; let okAll = true, retryable = false, anyOk = false, lastErr = '', ran = false;\n    st.problems.forEach(p => { okAll = false; lastErr = p; lines.push(`PROBLEM: ${p}`); });\n    st.targets.forEach(t => {\n      if (t.state === 'already_done') { anyOk = true; lines.push(`${t.platform}/${t.account}: already published (skipped)`); return; }\n      const r = t.state === 'invalid' ? { ok: false, error_code: t.error.code, error_message: t.error.message, retryable: false } : byKey[t.key] || { ok: false, error_code: 'no_result', error_message: 'no result returned by the platform workflow (check execution history)', retryable: false };\n      ran = true;\n      logAppends.push({ dedupe_key: t.key, time: iso, row_id: id, platform: t.platform, account_key: t.account, status: r.ok ? 'success' : 'failed', post_id: r.post_id || '', post_url: r.post_url || '', error_code: r.error_code || '', error_message: String(r.error_message || '').slice(0, 500), attempt: (st.attempts || 0) + 1 });\n      if (r.ok) { anyOk = true; if (r.post_url) urls.push(r.post_url); lines.push(`${t.platform}/${t.account}: OK ${r.post_url || r.post_id || ''}${r.note ? ' (' + r.note + ')' : ''}`); }\n      else { okAll = false; if (r.retryable) retryable = true; lastErr = `${t.platform}/${t.account}: ${r.error_code}: ${r.error_message}`; lines.push(`${t.platform}/${t.account}: FAIL${r.retryable ? ' (will retry)' : ''} ${r.error_code}: ${r.error_message}`); }\n    });\n    const attempts = (st.attempts || 0) + (ran ? 1 : 0);\n    let status, next = '';\n    if (okAll) status = 'published';\n    else if (retryable && attempts < cfg.max_attempts) { status = 'retry'; next = new Date(now + backoffMinutes(cfg, attempts) * 60000).toISOString(); }\n    else status = anyOk ? 'partial_error' : 'error';\n    rowUpdates.push({ id, status, attempts, next_attempt_at: next, results: lines.join('\\n').slice(0, 4000), last_error: okAll ? '' : lastErr.slice(0, 500), published_urls: urls.join('\\n'), updated_at: iso });\n  });\n  return { rowUpdates, logAppends };\n}\n\nif (typeof module !== 'undefined' && module.exports) module.exports = { PLATFORMS, DEFAULTS, parseWhen, field, detectFormat, buildJobs, finalize, dedupeKey, norm, csv, lowerKeys };\n\nconst body = $input.first().json.body || {};\nconst res = buildJobs({ content: body.content, accounts: body.accounts, log: body.log, now: body.now || Date.now(), config: body.config });\nreturn [{ json: { ...res, config: body.config || {}, _base: body.base || '', now: body.now || Date.now() } }];"
+      },
+      "id": "e3514112-4691-44bd-a5be-042d8d23080d",
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "name": "Any jobs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "272b98b6-bb71-44f2-a9f7-83bfae351466",
+              "leftValue": "={{ $json.jobs.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "01d6be14-4480-4a21-a525-bfaa17f9db67",
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "name": "Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const b = $('Build').first().json; const WF = {\"reddit\":\"smwf000000000010\",\"facebook\":\"smwf000000000011\",\"instagram\":\"smwf000000000012\",\"youtube\":\"smwf000000000013\",\"x\":\"smwf000000000014\",\"linkedin\":\"smwf000000000015\",\"threads\":\"smwf000000000016\",\"pinterest\":\"smwf000000000017\",\"tumblr\":\"smwf000000000018\",\"tiktok\":\"smwf000000000019\"};\nreturn b.jobs.map(j => ({ json: { ...j, _wf: WF[j.platform], _base: b._base || undefined } }));"
+      },
+      "id": "1dd46124-cbd6-4032-afe8-ad54a4cf4ca5",
+      "position": [
+        720,
+        -160
+      ]
+    },
+    {
+      "name": "Run platform workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json._wf }}"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "f6743c3c-188c-4e65-a661-f72f35ea4c50",
+      "position": [
+        960,
+        -160
+      ]
+    },
+    {
+      "name": "Finalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Pure logic for the Sheets -> platforms pipeline. Embedded verbatim into n8n Code nodes by scripts/build-workflows.js.\n// It never writes or rewrites content: it only selects, routes, concatenates the user's own fields and records results.\n\nconst PLATFORMS = ['reddit', 'facebook', 'instagram', 'youtube', 'x', 'linkedin', 'threads', 'pinterest', 'tumblr', 'tiktok'];\nconst ELIGIBLE = ['ready', 'scheduled', 'pending', 'retry'];\nconst VIDEO_EXT = ['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'], IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp'];\nconst DEFAULTS = { timezone: 'UTC', max_attempts: 3, backoff_minutes: [5, 15, 60], append_hashtags: true, max_rows_per_run: 20 };\n\nconst norm = v => (v === undefined || v === null ? '' : String(v).trim());\nconst csv = v => norm(v).split(/[,;\\n]+/).map(s => s.trim()).filter(Boolean);\nconst truthy = (v, def) => { const s = norm(v).toLowerCase(); return s === '' ? def : !['false', '0', 'no', 'off', 'disabled'].includes(s); };\nconst lowerKeys = o => { const r = {}; Object.keys(o || {}).forEach(k => { r[String(k).trim().toLowerCase()] = o[k]; }); return r; };\n\n// ---- time -------------------------------------------------------------------\nfunction tzOffsetMs(ms, tz) {\n  const p = {}; new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(ms)).forEach(x => { p[x.type] = x.value; });\n  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000;\n}\nfunction wallToUtc(y, mo, d, h, mi, s, tz) { const g = Date.UTC(y, mo - 1, d, h, mi, s); let r = g - tzOffsetMs(g, tz); r = g - tzOffsetMs(r, tz); return r; }\n// Accepts ISO with offset/Z, \"YYYY-MM-DD[ T]HH:mm[:ss]\" or a date (wall time in tz), or a Sheets serial number.\nfunction parseWhen(v, tz) {\n  const s = norm(v); if (!s) return null;\n  if (/^\\d+(\\.\\d+)?$/.test(s) && +s > 20000 && +s < 80000) { const ms = Math.round((+s - 25569) * 86400000); const d = new Date(ms); return wallToUtc(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), tz); }\n  if (/(Z|[+-]\\d{2}:?\\d{2})$/.test(s) && /\\d{4}-\\d{2}-\\d{2}[T ]\\d/.test(s)) { const t = Date.parse(s.replace(' ', 'T')); return isNaN(t) ? NaN : t; }\n  const m = /^(\\d{4})-(\\d{1,2})-(\\d{1,2})(?:[ T](\\d{1,2}):(\\d{2})(?::(\\d{2}))?)?$/.exec(s);\n  if (m) return wallToUtc(+m[1], +m[2], +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0), tz);\n  return NaN;\n}\n\n// ---- field resolution: field@account > field_platform > field > Accounts-sheet default ----\nfunction field(row, name, platform, account, acct) {\n  for (const k of [`${name}@${account}`, `${name}_${platform}`, name]) { if (norm(row[k]) !== '') return norm(row[k]); }\n  return acct && norm(acct[name]) !== '' ? norm(acct[name]) : '';\n}\nfunction extOf(u) { const m = /\\.([a-z0-9]{2,4})(?:[?#].*)?$/i.exec(u); return m ? m[1].toLowerCase() : ''; }\nfunction detectFormat(explicit, urls, link) {\n  const e = norm(explicit).toLowerCase();\n  if (e && e !== 'auto') return ['text', 'image', 'video', 'link'].includes(e) ? { format: e } : { error: `format \"${e}\" is not text|image|video|link|auto` };\n  if (urls.length) {\n    const ex = urls.map(extOf);\n    if (ex.some(x => VIDEO_EXT.includes(x))) return { format: 'video' };\n    if (ex.every(x => IMAGE_EXT.includes(x))) return { format: 'image' };\n    return { error: 'cannot tell if media_urls are images or video from the file extension; set the format column' };\n  }\n  return { format: link ? 'link' : 'text' };\n}\nconst dedupeKey = (id, platform, account) => `${id}|${platform}|${account}`;\n\n// ---- jobs -----------------------------------------------------------------------\n// input: { content:[row], accounts:[row], log:[row], now:ms, config }\nfunction buildJobs(input) {\n  const cfg = Object.assign({}, DEFAULTS, input.config || {}); const now = input.now;\n  const accounts = {}; (input.accounts || []).forEach(r => { r = lowerKeys(r); const k = norm(r.account_key).toLowerCase(); if (k) accounts[k] = r; });\n  const done = new Set(); (input.log || []).forEach(r => { r = lowerKeys(r); if (norm(r.status).toLowerCase() === 'success') done.add(norm(r.dedupe_key)); });\n  const jobs = [], rowState = {}, skipped = [], seen = new Set(); let taken = 0;\n  for (const raw of input.content || []) {\n    const row = lowerKeys(raw); const id = norm(row.id);\n    if (!id) { skipped.push({ id: '', reason: 'row has no id' }); continue; }\n    if (seen.has(id)) { skipped.push({ id, reason: 'duplicate id in sheet; every row needs a unique id' }); continue; } seen.add(id);\n    const status = norm(row.status).toLowerCase();\n    if (!ELIGIBLE.includes(status)) { skipped.push({ id, reason: `status \"${status || '(blank)'}\" is not ready/scheduled/pending/retry` }); continue; }\n    const when = parseWhen(row.publish_at, cfg.timezone);\n    if (Number.isNaN(when)) { skipped.push({ id, reason: `publish_at \"${norm(row.publish_at)}\" not understood`, flag: 'bad_date' }); continue; }\n    if (when !== null && when > now) { skipped.push({ id, reason: 'not due yet' }); continue; }\n    if (status === 'retry' && norm(row.next_attempt_at)) { const na = parseWhen(row.next_attempt_at, 'UTC'); if (na && na > now) { skipped.push({ id, reason: 'waiting for retry backoff' }); continue; } }\n    if (taken >= cfg.max_rows_per_run) { skipped.push({ id, reason: 'over max_rows_per_run; next run' }); continue; }\n    taken++;\n    // targets\n    let plats = csv(row.platforms).map(s => s.toLowerCase()), accs = csv(row.accounts).map(s => s.toLowerCase());\n    const all = x => x.length === 1 && x[0] === 'all';\n    const enabled = Object.keys(accounts).filter(k => truthy(accounts[k].enabled, true));\n    let targets = []; const problems = [];\n    if (!plats.length && !accs.length) problems.push('no platforms or accounts given');\n    if (all(plats)) plats = PLATFORMS.filter(p => enabled.some(k => norm(accounts[k].platform).toLowerCase() === p));\n    if (!plats.length && accs.length && !all(accs)) plats = [...new Set(accs.map(k => norm((accounts[k] || {}).platform).toLowerCase()).filter(Boolean))];\n    plats.forEach(p => { if (!PLATFORMS.includes(p)) problems.push(`unknown platform \"${p}\"`); });\n    if (all(accs) || !accs.length) plats.filter(p => PLATFORMS.includes(p)).forEach(p => enabled.filter(k => norm(accounts[k].platform).toLowerCase() === p).forEach(k => targets.push([p, k])));\n    else accs.forEach(k => {\n      const a = accounts[k];\n      if (!a) { problems.push(`unknown account \"${k}\" (not in the Accounts sheet)`); return; }\n      if (!truthy(a.enabled, true)) { problems.push(`account \"${k}\" is disabled`); return; }\n      const p = norm(a.platform).toLowerCase();\n      if (plats.length && !plats.includes(p)) { problems.push(`account \"${k}\" is a ${p} account but platforms is ${plats.join('/')}`); return; }\n      targets.push([p, k]);\n    });\n    if (!targets.length && !problems.length) problems.push('no enabled account matches the requested platforms');\n    const state = { attempts: +norm(row.attempts) || 0, targets: [], problems };\n    targets.forEach(([p, k]) => {\n      const key = dedupeKey(id, p, k); const acct = accounts[k];\n      if (done.has(key)) { state.targets.push({ key, platform: p, account: k, state: 'already_done' }); return; }\n      const get = n => field(row, n, p, k, acct);\n      const urls = csv(get('media_urls')); const link = get('link_url'); const f = detectFormat(get('format'), urls, link);\n      const base = { key, platform: p, account: k };\n      if (f.error) { state.targets.push({ ...base, state: 'invalid', error: { code: 'bad_format', message: f.error, retryable: false } }); return; }\n      const caption = get('caption'), tags = get('hashtags');\n      const params = {}; Object.keys(row).forEach(c => { if (!/^(id|status|publish_at|platforms|accounts|attempts|next_attempt_at|results|last_error|published_urls|updated_at)$/.test(c) && !c.includes('@')) { const m = /^(.*)_(reddit|facebook|instagram|youtube|x|linkedin|threads|pinterest|tumblr|tiktok)$/.exec(c); if (!m) params[c] = get(c); else if (m[2] === p) params[m[1]] = get(m[1]); } });\n      Object.keys(acct).forEach(c => { if (params[c] === undefined || params[c] === '') params[c] = norm(acct[c]); });\n      const job = { job_id: key, row_id: id, platform: p, account_key: k, slot: parseInt(acct.slot, 10) || 0, format: f.format, title: get('title'), caption, description: get('description'), hashtags: tags, link_url: link, media_urls: urls, text: [caption, cfg.append_hashtags && tags ? tags : ''].filter(Boolean).join('\\n\\n'), params };\n      state.targets.push({ ...base, state: 'job' }); jobs.push(job);\n    });\n    rowState[id] = state;\n  }\n  return { jobs, rowState, skipped, preUpdates: Object.keys(rowState).filter(id => rowState[id].targets.some(t => t.state === 'job')).map(id => ({ id, status: 'publishing', updated_at: new Date(now).toISOString() })) };\n}\n\n// ---- results -> row updates + log lines ------------------------------------------------------\nfunction backoffMinutes(cfg, attempts) { const b = cfg.backoff_minutes || DEFAULTS.backoff_minutes; return b[Math.min(attempts, b.length) - 1] || b[b.length - 1]; }\nfunction finalize(input) {\n  const cfg = Object.assign({}, DEFAULTS, input.config || {}); const now = input.now; const iso = new Date(now).toISOString();\n  const byKey = {}; (input.results || []).forEach(r => { byKey[r.job_id] = r; });\n  const rowUpdates = [], logAppends = [];\n  Object.keys(input.rowState || {}).forEach(id => {\n    const st = input.rowState[id]; const lines = []; const urls = []; let okAll = true, retryable = false, anyOk = false, lastErr = '', ran = false;\n    st.problems.forEach(p => { okAll = false; lastErr = p; lines.push(`PROBLEM: ${p}`); });\n    st.targets.forEach(t => {\n      if (t.state === 'already_done') { anyOk = true; lines.push(`${t.platform}/${t.account}: already published (skipped)`); return; }\n      const r = t.state === 'invalid' ? { ok: false, error_code: t.error.code, error_message: t.error.message, retryable: false } : byKey[t.key] || { ok: false, error_code: 'no_result', error_message: 'no result returned by the platform workflow (check execution history)', retryable: false };\n      ran = true;\n      logAppends.push({ dedupe_key: t.key, time: iso, row_id: id, platform: t.platform, account_key: t.account, status: r.ok ? 'success' : 'failed', post_id: r.post_id || '', post_url: r.post_url || '', error_code: r.error_code || '', error_message: String(r.error_message || '').slice(0, 500), attempt: (st.attempts || 0) + 1 });\n      if (r.ok) { anyOk = true; if (r.post_url) urls.push(r.post_url); lines.push(`${t.platform}/${t.account}: OK ${r.post_url || r.post_id || ''}${r.note ? ' (' + r.note + ')' : ''}`); }\n      else { okAll = false; if (r.retryable) retryable = true; lastErr = `${t.platform}/${t.account}: ${r.error_code}: ${r.error_message}`; lines.push(`${t.platform}/${t.account}: FAIL${r.retryable ? ' (will retry)' : ''} ${r.error_code}: ${r.error_message}`); }\n    });\n    const attempts = (st.attempts || 0) + (ran ? 1 : 0);\n    let status, next = '';\n    if (okAll) status = 'published';\n    else if (retryable && attempts < cfg.max_attempts) { status = 'retry'; next = new Date(now + backoffMinutes(cfg, attempts) * 60000).toISOString(); }\n    else status = anyOk ? 'partial_error' : 'error';\n    rowUpdates.push({ id, status, attempts, next_attempt_at: next, results: lines.join('\\n').slice(0, 4000), last_error: okAll ? '' : lastErr.slice(0, 500), published_urls: urls.join('\\n'), updated_at: iso });\n  });\n  return { rowUpdates, logAppends };\n}\n\nif (typeof module !== 'undefined' && module.exports) module.exports = { PLATFORMS, DEFAULTS, parseWhen, field, detectFormat, buildJobs, finalize, dedupeKey, norm, csv, lowerKeys };\n\nconst b = $('Build').first().json;\nlet jobs = []; try { jobs = $('Jobs').all().map(i => i.json); } catch (e) { jobs = []; }\nconst out = jobs.length ? $input.all().map(i => i.json) : [];\nconst results = jobs.map((j, i) => { const r = out[i] || {}; if (typeof r.ok !== 'boolean') return { job_id: j.job_id, ok: false, error_code: 'workflow_error', error_message: String((r.error && (r.error.message || r.error.description || JSON.stringify(r.error))) || 'platform workflow returned nothing').slice(0, 300), retryable: false }; return r; });\nconst f = finalize({ rowState: b.rowState, results, now: b.now || Date.now(), config: b.config });\nconst bad = (b.skipped || []).filter(s => s.flag === 'bad_date').map(s => ({ id: s.id, status: 'error', last_error: s.reason, updated_at: new Date().toISOString() }));\nreturn [{ json: { rowUpdates: f.rowUpdates.concat(bad), logAppends: f.logAppends, results, jobs, skipped: b.skipped } }];"
+      },
+      "id": "52e2e5a3-ee8f-491d-a365-fbda2793eb7d",
+      "position": [
+        1200,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build": {
+      "main": [
+        [
+          {
+            "node": "Any jobs?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any jobs?": {
+      "main": [
+        [
+          {
+            "node": "Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jobs": {
+      "main": [
+        [
+          {
+            "node": "Run platform workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run platform workflow": {
+      "main": [
+        [
+          {
+            "node": "Finalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

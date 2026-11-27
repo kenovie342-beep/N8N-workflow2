@@ -1,0 +1,18 @@
+{
+  "name": "n8n-social-automation",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Multi-account social media automation on stock n8n, driven by Google Sheets",
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "start": "bash scripts/start-n8n.sh --background",
+    "stop": "bash scripts/start-n8n.sh stop",
+    "build": "node scripts/build-workflows.js",
+    "import": "bash scripts/import-workflows.sh",
+    "test": "node --test test/*.test.js",
+    "test:e2e": "bash test/e2e/run.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

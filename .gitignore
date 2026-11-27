@@ -1,0 +1,6 @@
+.env
+data/
+runtime/
+logs/
+*.pid
+node_modules/
